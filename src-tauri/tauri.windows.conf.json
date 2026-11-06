@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "resources": {
+      "vendor/libmpv-2.dll": "libmpv-2.dll",
+      "vendor/ffmpeg.exe": "ffmpeg.exe",
+      "vendor/ffprobe.exe": "ffprobe.exe"
+    }
+  }
+}

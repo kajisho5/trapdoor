@@ -1,0 +1,101 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch libmpv and ffmpeg (bundled next to the exe)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force src-tauri/vendor | Out-Null
+          # libmpv: shinchiro/mpv-winbuild-cmake, x86_64 (non-v3, no AVX2 requirement)
+          $mpv = gh api repos/shinchiro/mpv-winbuild-cmake/releases/latest | ConvertFrom-Json
+          $asset = $mpv.assets | Where-Object { $_.name -match '^mpv-dev-x86_64-\d+-git-[0-9a-f]+\.7z$' } | Select-Object -First 1
+          if (-not $asset) { throw "libmpv asset not found" }
+          Write-Host "libmpv: $($asset.name)"
+          Invoke-WebRequest $asset.browser_download_url -OutFile mpv.7z
+          7z e mpv.7z libmpv-2.dll -osrc-tauri/vendor -y | Out-Null
+          # ffmpeg/ffprobe: BtbN/FFmpeg-Builds, newest release branch, GPL static
+          $ff = gh api repos/BtbN/FFmpeg-Builds/releases/tags/latest | ConvertFrom-Json
+          $fa = $ff.assets | Where-Object { $_.name -match '^ffmpeg-n[\d.]+-latest-win64-gpl-[\d.]+\.zip$' } | Sort-Object { [version](($_.name -replace '^ffmpeg-n([\d.]+)-.*','$1') + '.0') } -Descending | Select-Object -First 1
+          if (-not $fa) { throw "ffmpeg asset not found" }
+          Write-Host "ffmpeg: $($fa.name)"
+          Invoke-WebRequest $fa.browser_download_url -OutFile ff.zip
+          7z e ff.zip ffmpeg.exe ffprobe.exe -r -osrc-tauri/vendor -y | Out-Null
+          Get-ChildItem src-tauri/vendor | Format-Table Name, Length
+          "LIBMPV=$($asset.name)" >> $env:GITHUB_ENV
+          "FFMPEG=$($fa.name)" >> $env:GITHUB_ENV
+
+      - run: npm ci
+
+      - name: Engine tests (Windows)
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\src-tauri\vendor;$env:PATH"
+          cargo test -p trapdoor-engine --locked
+
+      - name: Build app
+        run: npx tauri build
+
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          $v = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          New-Item -ItemType Directory -Force out/TRAPDOOR | Out-Null
+          Copy-Item target/release/trapdoor.exe out/TRAPDOOR/TRAPDOOR.exe
+          Copy-Item src-tauri/vendor/* out/TRAPDOOR/
+          Copy-Item LICENSE, README.md out/TRAPDOOR/
+          Compress-Archive -Path out/TRAPDOOR -DestinationPath "out/TRAPDOOR-$v-windows-x64-portable.zip" -Force
+          Copy-Item (Get-ChildItem target/release/bundle/nsis/*.exe | Select-Object -First 1).FullName "out/TRAPDOOR-$v-windows-x64-setup.exe"
+          "VERSION=$v" >> $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: TRAPDOOR-windows-x64
+          path: |
+            out/*.zip
+            out/*.exe
+
+      # Release automatically when main carries a version that has not been released yet.
+      - name: Release (new version only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          $tag = "v$env:VERSION"
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) { Write-Host "$tag already released, skipping"; exit 0 }
+          $notes = @"
+          TRAPDOOR $env:VERSION (Windows x64)
+
+          - Installer: TRAPDOOR-$env:VERSION-windows-x64-setup.exe
+          - Portable: unzip and run TRAPDOOR.exe
+
+          Bundled: $env:LIBMPV, $env:FFMPEG
+          "@
+          gh release create $tag out/*.zip out/*.exe --title "TRAPDOOR $env:VERSION" --notes $notes --target $env:GITHUB_SHA
