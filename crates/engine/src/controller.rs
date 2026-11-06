@@ -139,6 +139,7 @@ struct OnAir {
     loops_done: u32,
     looping_override: Option<bool>,
     fade_out_started: bool,
+    started_at: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -388,6 +389,7 @@ impl<D: Deck> Controller<D> {
             loops_done: 0,
             looping_override: None,
             fade_out_started: false,
+            started_at: self.now,
         });
     }
 
@@ -736,7 +738,12 @@ impl<D: Deck> Controller<D> {
             }
         }
 
-        if p.phase == Phase::Playing && st.at_end {
+        // Stills with a hold time end on the controller clock.
+        let still_done = is_still
+            && p.phase == Phase::Playing
+            && cue.still_frames.map(|f| now - p.started_at >= rate.frames_to_seconds(f)).unwrap_or(false);
+
+        if p.phase == Phase::Playing && (st.at_end || still_done) {
             if looping && (p.looping_override == Some(true) || cue.loop_count == 0 || p.loops_done + 1 < cue.loop_count) {
                 let start = rate.frames_to_seconds(cue.in_frame);
                 self.decks[p.deck].seek(start);
@@ -744,6 +751,7 @@ impl<D: Deck> Controller<D> {
                 let pm = self.program.as_mut().unwrap();
                 pm.loops_done += 1;
                 pm.fade_out_started = false;
+                pm.started_at = now;
                 return;
             }
             let end = if looping && cue.end == EndAction::Loop { EndAction::Black } else { cue.end };
@@ -966,6 +974,22 @@ mod tests {
         let st = c.state();
         assert_eq!(st.program.unwrap().cue_id, "c2");
         assert_eq!(st.standby_cue_id.as_deref(), Some("c0"));
+    }
+
+    #[test]
+    fn still_with_duration_ends() {
+        let mut s = show();
+        s.media[0].kind = MediaKind::Still;
+        s.media[0].duration_frames = 0;
+        s.cues[0].still_frames = Some(50); // 2 s at 25 fps
+        s.cues[0].end = EndAction::Next;
+        let mut c = Controller::new(s, [SimDeck::default(), SimDeck::default()]);
+        let mut t = 0.0;
+        c.handle(Command::Go).unwrap();
+        run(&mut c, &mut t, 1.0);
+        assert_eq!(c.state().program.unwrap().cue_id, "c0");
+        run(&mut c, &mut t, 1.2);
+        assert_eq!(c.state().program.unwrap().cue_id, "c1");
     }
 
     #[test]

@@ -93,7 +93,7 @@ function simEngine(): Engine {
   return {
     command: async (cmd) => sim.handle(cmd),
     getShow: () => ok(structuredClone(sim.show)),
-    info: () => ok({ version: "0.1.0", mpvError: "browser simulator", ffmpeg: false, output: "SIMULATOR" }),
+    info: () => ok({ version: "0.1.1", mpvError: "browser simulator", ffmpeg: false, output: "SIMULATOR" }),
     presets: () =>
       ok([
         { label: "HD 1080", width: 1920, height: 1080 },
